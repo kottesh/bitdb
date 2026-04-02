@@ -126,11 +126,7 @@ fn rebuild_parallel(
 ///
 /// Returns entries in file order (offset ascending).  Errors that are not
 /// recoverable under `policy` are propagated immediately.
-fn scan_file(
-    file_set: &FileSet,
-    file_id: u32,
-    policy: CorruptionPolicy,
-) -> Result<Vec<ScanEntry>> {
+fn scan_file(file_set: &FileSet, file_id: u32, policy: CorruptionPolicy) -> Result<Vec<ScanEntry>> {
     let hint_path = file_set
         .hint_path(file_id)
         .ok_or(BitdbError::DataFileNotFound(file_id))?;
@@ -185,7 +181,11 @@ fn scan_file_by_path(
 ///
 /// Stops on `TruncatedRecord` (safe truncated tail).  Corruption errors are
 /// either propagated or cause an early stop depending on `policy`.
-fn scan_data_file(file_id: u32, path: &PathBuf, policy: CorruptionPolicy) -> Result<Vec<ScanEntry>> {
+fn scan_data_file(
+    file_id: u32,
+    path: &PathBuf,
+    policy: CorruptionPolicy,
+) -> Result<Vec<ScanEntry>> {
     let bytes = std::fs::read(path)?;
     let mut offset = 0usize;
     let mut entries = Vec::new();

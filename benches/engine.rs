@@ -41,7 +41,8 @@ fn engine_scaffold_bench(c: &mut Criterion) {
     {
         let dir = tempdir().expect("tempdir should be created");
         {
-            let mut engine = Engine::open(dir.path(), Options::default()).expect("engine should open");
+            let mut engine =
+                Engine::open(dir.path(), Options::default()).expect("engine should open");
             for i in 0..2000 {
                 let key = format!("bench_key_{i:06}");
                 let val = format!("bench_val_{i:06}");
@@ -79,8 +80,11 @@ fn engine_scaffold_bench(c: &mut Criterion) {
     c.bench_function("merge_serial", |b| {
         b.iter(|| {
             let dir = tempdir().expect("tempdir should be created");
-            let mut engine =
-                Engine::open(dir.path(), Options::default()).expect("engine should open");
+            let mut engine = Engine::open(dir.path(), Options {
+                parallelism: Parallelism::Serial,
+                ..Options::default()
+            })
+            .expect("engine should open");
             for i in 0..1000 {
                 let key = format!("hot-{}", i % 64);
                 let val = format!("v{i}");
@@ -91,6 +95,54 @@ fn engine_scaffold_bench(c: &mut Criterion) {
             engine.merge().expect("merge should work");
         })
     });
+
+    // Compare serial vs parallel merge on a dataset with many unique live keys
+    // so the read phase has meaningful work to parallelise.
+    {
+        let mut group = c.benchmark_group("merge_pipeline");
+
+        for (label, parallelism) in [
+            ("serial", Parallelism::Serial),
+            ("parallel_auto", Parallelism::Auto),
+        ] {
+            group.bench_with_input(
+                BenchmarkId::new("mode", label),
+                &parallelism,
+                |b, &par| {
+                    b.iter(|| {
+                        let dir = tempdir().expect("tempdir should be created");
+                        let mut engine = Engine::open(
+                            dir.path(),
+                            Options {
+                                parallelism: par,
+                                ..Options::default()
+                            },
+                        )
+                        .expect("engine should open");
+                        // Write 500 unique keys with a few overwrites to
+                        // simulate realistic compaction input.
+                        for i in 0..500 {
+                            let key = format!("mk{i:04}");
+                            let val = format!("mv{i:04}");
+                            engine
+                                .put(key.as_bytes(), val.as_bytes())
+                                .expect("put should work");
+                        }
+                        for i in 0..100 {
+                            let key = format!("mk{i:04}");
+                            let val = format!("mv{i:04}_v2");
+                            engine
+                                .put(key.as_bytes(), val.as_bytes())
+                                .expect("overwrite should work");
+                        }
+                        engine.merge().expect("merge should work");
+                    });
+                },
+            );
+        }
+
+        group.finish();
+    }
 }
 
 criterion_group!(benches, engine_scaffold_bench);
