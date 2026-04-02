@@ -11,6 +11,7 @@
 - Configurable parallelism for startup rebuild and merge.
 - Merge/compaction that rewrites only live keys.
 - CLI for put, get, delete, stats, merge, and benchmarks.
+- Interactive TUI with a scrollable session and a live stats bar.
 
 See `docs/ARCHITECTURE.md` for the full design including file format,
 recovery semantics, and the parallel pipeline model.
@@ -26,7 +27,73 @@ cargo run -- --help
 
 ---
 
-## Operations
+## TUI (interactive mode)
+
+Launch the interactive terminal interface:
+
+```bash
+cargo run -- tui
+cargo run -- --data-dir ./data tui
+```
+
+Layout:
+
+```
++----------------------------------------------------------------------+
+| live_keys: 3   tombstones: 1   data_dir: ./data                      |  <- cement grey stats bar
++----------------------------------------------------------------------+
+|                                                                       |
+|  > help                                                               |
+|  commands:                                                            |
+|    put <key> <value>   insert or overwrite a key                     |
+|    get <key>           retrieve a value                              |
+|    delete <key>        delete a key                                  |
+|    stats               show live_keys and tombstones                 |
+|    merge               run compaction                                |
+|    clear               clear this output                             |
+|    quit / exit         exit the TUI                                  |
+|                                                                       |
+|  > put hello world                                                    |
+|  OK                                                                   |
+|                                                                       |
+|  > get hello                                                          |
+|  world                                                                |
+|                                                                       |
+|  > _                                                                  |  <- input follows last output
+|                                                                       |
++----------------------------------------------------------------------+
+```
+
+The stats bar (top) refreshes automatically after every mutating command.
+The output area scrolls naturally as content grows.
+The input prompt is not pinned; it lives right after the last output line.
+
+### TUI keybindings
+
+| Key | Action |
+|---|---|
+| `Enter` | Submit the current command |
+| `Backspace` | Delete the last character |
+| `Up` | Recall previous command from history |
+| `Down` | Move forward in history (empty line at end) |
+| `Ctrl-C` / `Ctrl-D` | Exit the TUI |
+
+### TUI commands
+
+| Command | Description |
+|---|---|
+| `help` | List all available commands |
+| `put <key> <value>` | Insert or overwrite a key |
+| `get <key>` | Retrieve a value (`NOT_FOUND` if absent) |
+| `delete <key>` | Delete a key (tombstone) |
+| `stats` | Print current live_keys and tombstones |
+| `merge` | Run compaction (removes dead records) |
+| `clear` | Clear the output history |
+| `quit` / `exit` | Exit the TUI |
+
+---
+
+## CLI operations
 
 All examples run from repo root.
 
@@ -134,7 +201,7 @@ Workload (serial):
 cargo run -- --data-dir ./bench-data bench workload --ops 5000 --mode serial
 ```
 
-Workload (parallel startup/merge):
+Workload (parallel):
 
 ```bash
 cargo run -- --data-dir ./bench-data bench workload --ops 5000 --mode parallel
@@ -171,13 +238,13 @@ Baseline results are tracked in `BENCHMARK_BASELINE.md`.
 
 The engine accepts an `Options::parallelism` value:
 
-| Value           | Behaviour                                      |
-|-----------------|------------------------------------------------|
-| `Serial`        | All operations run single-threaded.            |
-| `Auto`          | rayon uses all available logical CPUs.         |
-| `Fixed(n)`      | rayon uses exactly `n` threads.                |
+| Value | Behaviour |
+|---|---|
+| `Serial` | All operations run single-threaded. |
+| `Auto` | rayon uses all available logical CPUs. |
+| `Fixed(n)` | rayon uses exactly `n` threads. |
 
-Parallel paths affect startup rebuild and the merge read phase.  The
+Parallel paths affect startup rebuild and the merge read phase. The
 merge write phase and final install are always single-threaded.
 
 ---
@@ -197,5 +264,6 @@ cargo test --test record
 cargo test --test merge
 cargo test --test parallel_rebuild
 cargo test --test parallel_merge
+cargo test --test tui
 cargo test cli_put_get_delete_flow -- --exact
 ```
