@@ -36,37 +36,6 @@ cargo run -- tui
 cargo run -- --data-dir ./data tui
 ```
 
-Layout:
-
-```
-+----------------------------------------------------------------------+
-| live_keys: 3   tombstones: 1   data_dir: ./data                      |  <- cement grey stats bar
-+----------------------------------------------------------------------+
-|                                                                       |
-|  > help                                                               |
-|  commands:                                                            |
-|    put <key> <value>   insert or overwrite a key                     |
-|    get <key>           retrieve a value                              |
-|    delete <key>        delete a key                                  |
-|    stats               show live_keys and tombstones                 |
-|    merge               run compaction                                |
-|    clear               clear this output                             |
-|    quit / exit         exit the TUI                                  |
-|                                                                       |
-|  > put hello world                                                    |
-|  OK                                                                   |
-|                                                                       |
-|  > get hello                                                          |
-|  world                                                                |
-|                                                                       |
-|  > _                                                                  |  <- input follows last output
-|                                                                       |
-+----------------------------------------------------------------------+
-```
-
-The stats bar (top) refreshes automatically after every mutating command.
-The output area scrolls naturally as content grows.
-The input prompt is not pinned; it lives right after the last output line.
 
 ### TUI keybindings
 
