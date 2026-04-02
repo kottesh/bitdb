@@ -7,6 +7,12 @@ fn main() {
 
 fn run() -> bitdb::error::Result<()> {
     let cli = bitdb::cli::parse();
+
+    // The TUI opens its own engine internally; skip the shared engine open.
+    if let bitdb::cli::Command::Tui = cli.command {
+        return bitdb::tui::run(&cli.data_dir);
+    }
+
     let mut engine = bitdb::engine::Engine::open(&cli.data_dir, bitdb::config::Options::default())?;
 
     match cli.command {
@@ -51,6 +57,8 @@ fn run() -> bitdb::error::Result<()> {
                 println!("{out}");
             }
         },
+        // Handled before the engine open above; unreachable here.
+        bitdb::cli::Command::Tui => unreachable!(),
     }
 
     Ok(())

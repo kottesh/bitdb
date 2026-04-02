@@ -8,3 +8,4 @@ pub mod merge;
 pub mod record;
 pub mod recovery;
 pub mod storage;
+pub mod tui;

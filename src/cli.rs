@@ -30,6 +30,8 @@ pub enum Command {
         #[command(subcommand)]
         command: BenchCommand,
     },
+    /// Launch the interactive TUI.
+    Tui,
 }
 
 #[derive(Debug, Subcommand)]
