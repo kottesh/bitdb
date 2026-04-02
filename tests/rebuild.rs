@@ -1,4 +1,4 @@
-use bitdb::config::Options;
+use bitdb::config::{Options, Parallelism};
 use bitdb::record::{Record, RecordFlags};
 use bitdb::recovery::rebuild_keydir;
 use bitdb::storage::file_set::FileSet;
@@ -10,8 +10,8 @@ fn rebuild_empty_directory_has_empty_keydir() {
     let options = Options::default();
     let file_set = FileSet::open(dir.path(), &options).expect("open should succeed");
 
-    let keydir =
-        rebuild_keydir(&file_set, options.corruption_policy).expect("rebuild should succeed");
+    let keydir = rebuild_keydir(&file_set, options.corruption_policy, Parallelism::Serial)
+        .expect("rebuild should succeed");
 
     assert_eq!(keydir.len(), 0);
 }
@@ -42,8 +42,8 @@ fn rebuild_keeps_latest_overwrite() {
     }
 
     let reopened = FileSet::open(dir.path(), &options).expect("open should succeed");
-    let keydir =
-        rebuild_keydir(&reopened, options.corruption_policy).expect("rebuild should succeed");
+    let keydir = rebuild_keydir(&reopened, options.corruption_policy, Parallelism::Serial)
+        .expect("rebuild should succeed");
     let entry = keydir.get(b"alpha").expect("key should exist");
 
     assert!(!entry.is_tombstone);
@@ -79,8 +79,8 @@ fn rebuild_tombstone_hides_previous_value() {
     }
 
     let reopened = FileSet::open(dir.path(), &options).expect("open should succeed");
-    let keydir =
-        rebuild_keydir(&reopened, options.corruption_policy).expect("rebuild should succeed");
+    let keydir = rebuild_keydir(&reopened, options.corruption_policy, Parallelism::Serial)
+        .expect("rebuild should succeed");
     let entry = keydir.get(b"dead").expect("key should exist");
 
     assert!(entry.is_tombstone);
@@ -123,8 +123,8 @@ fn rebuild_scans_across_multiple_files() {
     }
 
     let reopened = FileSet::open(dir.path(), &options).expect("open should succeed");
-    let keydir =
-        rebuild_keydir(&reopened, options.corruption_policy).expect("rebuild should succeed");
+    let keydir = rebuild_keydir(&reopened, options.corruption_policy, Parallelism::Serial)
+        .expect("rebuild should succeed");
 
     assert_eq!(keydir.len(), 2);
     let k1 = keydir.get(b"k1").expect("k1 should exist");

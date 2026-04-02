@@ -26,7 +26,7 @@ pub struct Engine {
 impl Engine {
     pub fn open(data_dir: &Path, options: Options) -> Result<Self> {
         let file_set = FileSet::open(data_dir, &options)?;
-        let keydir = rebuild_keydir(&file_set, options.corruption_policy)?;
+        let keydir = rebuild_keydir(&file_set, options.corruption_policy, options.parallelism)?;
 
         Ok(Self {
             data_dir: data_dir.into(),
@@ -123,7 +123,11 @@ impl Engine {
     pub fn merge(&mut self) -> Result<()> {
         run_merge(self.data_dir(), &self.keydir, &self.file_set, &self.options)?;
         self.file_set = FileSet::open(self.data_dir(), &self.options)?;
-        self.keydir = rebuild_keydir(&self.file_set, self.options.corruption_policy)?;
+        self.keydir = rebuild_keydir(
+            &self.file_set,
+            self.options.corruption_policy,
+            self.options.parallelism,
+        )?;
         Ok(())
     }
 }

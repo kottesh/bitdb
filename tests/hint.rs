@@ -1,4 +1,4 @@
-use bitdb::config::Options;
+use bitdb::config::{Options, Parallelism};
 use bitdb::record::{Record, RecordFlags};
 use bitdb::recovery::rebuild_keydir;
 use bitdb::storage::file_set::FileSet;
@@ -31,7 +31,8 @@ fn hint_file_is_written_and_loaded_for_rebuild() {
     }
 
     let reopened = FileSet::open(dir.path(), &options).expect("open should succeed");
-    let keydir = rebuild_keydir(&reopened, options.corruption_policy).expect("rebuild should work");
+    let keydir = rebuild_keydir(&reopened, options.corruption_policy, Parallelism::Serial)
+        .expect("rebuild should work");
 
     assert_eq!(keydir.len(), 2);
     assert!(dir.path().join("00000001.hint").exists());
@@ -55,7 +56,8 @@ fn rebuild_falls_back_to_data_scan_when_hint_missing() {
     }
 
     let reopened = FileSet::open(dir.path(), &options).expect("open should succeed");
-    let keydir = rebuild_keydir(&reopened, options.corruption_policy).expect("rebuild should work");
+    let keydir = rebuild_keydir(&reopened, options.corruption_policy, Parallelism::Serial)
+        .expect("rebuild should work");
 
     let entry = keydir.get(b"k").expect("key should exist");
     let decoded = reopened
@@ -86,6 +88,7 @@ fn rebuild_falls_back_to_data_scan_when_hint_corrupt() {
         .expect("corrupt write should work");
 
     let reopened = FileSet::open(dir.path(), &options).expect("open should succeed");
-    let keydir = rebuild_keydir(&reopened, options.corruption_policy).expect("rebuild should work");
+    let keydir = rebuild_keydir(&reopened, options.corruption_policy, Parallelism::Serial)
+        .expect("rebuild should work");
     assert!(keydir.get(b"x").is_some());
 }
