@@ -21,7 +21,7 @@ fn run_scan_serial_returns_correct_total_keys() {
     let dir = TempDir::new().unwrap();
     populate(dir.path(), 500);
 
-    let result: RunResult = run_scan(dir.path(), 1).unwrap();
+    let result: RunResult = run_scan(dir.path(), 1, None).unwrap();
     assert_eq!(result.total_keys, 500);
 }
 
@@ -30,7 +30,7 @@ fn run_scan_parallel_returns_correct_total_keys() {
     let dir = TempDir::new().unwrap();
     populate(dir.path(), 500);
 
-    let result: RunResult = run_scan(dir.path(), 4).unwrap();
+    let result: RunResult = run_scan(dir.path(), 4, None).unwrap();
     assert_eq!(result.total_keys, 500);
 }
 
@@ -39,8 +39,8 @@ fn serial_and_parallel_return_same_key_count() {
     let dir = TempDir::new().unwrap();
     populate(dir.path(), 300);
 
-    let serial = run_scan(dir.path(), 1).unwrap();
-    let parallel = run_scan(dir.path(), 4).unwrap();
+    let serial = run_scan(dir.path(), 1, None).unwrap();
+    let parallel = run_scan(dir.path(), 4, None).unwrap();
 
     assert_eq!(serial.total_keys, parallel.total_keys);
 }
@@ -50,7 +50,7 @@ fn all_slots_finish_in_done_state() {
     let dir = TempDir::new().unwrap();
     populate(dir.path(), 200);
 
-    let result = run_scan(dir.path(), 2).unwrap();
+    let result = run_scan(dir.path(), 2, None).unwrap();
     for thread in &result.thread_states {
         for slot in &thread.slots {
             assert!(
@@ -67,7 +67,7 @@ fn done_slots_have_nonzero_duration() {
     let dir = TempDir::new().unwrap();
     populate(dir.path(), 200);
 
-    let result = run_scan(dir.path(), 2).unwrap();
+    let result = run_scan(dir.path(), 2, None).unwrap();
     for thread in &result.thread_states {
         for slot in &thread.slots {
             if let SlotState::Done {
@@ -89,7 +89,7 @@ fn run_result_wall_time_is_nonzero() {
     let dir = TempDir::new().unwrap();
     populate(dir.path(), 300);
 
-    let result = run_scan(dir.path(), 4).unwrap();
+    let result = run_scan(dir.path(), 4, None).unwrap();
     // keys_per_sec must be positive
     assert!(result.keys_per_sec > 0.0);
 }
@@ -99,6 +99,6 @@ fn thread_count_matches_requested() {
     let dir = TempDir::new().unwrap();
     populate(dir.path(), 100);
 
-    let result = run_scan(dir.path(), 3).unwrap();
+    let result = run_scan(dir.path(), 3, None).unwrap();
     assert_eq!(result.thread_states.len(), 3);
 }

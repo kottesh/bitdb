@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::collections::HashSet;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use crate::worker::{RunResult, SlotState, ThreadState};
+use crate::worker::{LiveProgress, RunResult, SlotState, ThreadState};
 
 /// Bar width in characters for file slot progress bars.
 const BAR_WIDTH: usize = 20;
@@ -24,6 +24,19 @@ pub struct SideSnapshot {
     pub elapsed_us: u64,
     pub done: bool,
     pub result: Option<RunResult>,
+    /// Set to `Some(Instant::now())` when the background thread is launched.
+    /// Used to compute an accurate live elapsed clock for the parallel side.
+    pub started_at: Option<std::time::Instant>,
+    /// Live in-flight progress written by the worker threads.
+    /// `None` before the scan starts or after it completes.
+    pub live_progress: Option<LiveProgress>,
+}
+
+/// Which column currently receives ↑/↓ scroll input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FocusedColumn {
+    Serial,
+    Parallel,
 }
 
 /// All state the live screen needs.
@@ -34,31 +47,59 @@ pub struct LiveState {
     pub parallel: SideSnapshot,
     /// Total keys in the dataset (for the footer counter).
     pub total_keys: usize,
-    /// When the live view started (for wall clock display).
-    pub started_at: Instant,
     /// How many columns to show (1 = single mode, 2 = both).
     pub columns: usize,
-    /// Scroll offset (lines) within each column.
-    pub scroll: u16,
+    /// Independent scroll offsets for each column.
+    pub serial_scroll: u16,
+    pub parallel_scroll: u16,
+    /// Which column ↑/↓ scrolls (only relevant in Both mode).
+    pub focused: FocusedColumn,
+    /// Cursor row index within the parallel column (points at a thread header).
+    pub parallel_cursor: usize,
+    /// Thread ids whose file slots are collapsed in the parallel column.
+    pub collapsed_threads: HashSet<usize>,
+    /// Set to true once all required scans are done.  The screen stays open
+    /// so the user can scroll; Enter/Space advances to the Result screen.
+    pub finished: bool,
 }
 
 impl LiveState {
-    pub fn keys_rebuilt(&self) -> usize {
-        // Count Done slots across whichever side is running.
-        let states = if self.columns == 2 || self.serial.elapsed_us > 0 {
-            &self.serial.thread_states
+    /// Number of thread headers in the parallel column (= thread count).
+    pub fn parallel_thread_count(&self) -> usize {
+        self.parallel.thread_states.len()
+    }
+
+    /// Toggle collapse for the thread at `parallel_cursor`.
+    pub fn toggle_parallel_cursor(&mut self) {
+        let n = self.parallel_thread_count();
+        if n == 0 {
+            return;
+        }
+        let cursor = self.parallel_cursor.min(n - 1);
+        let tid = self.parallel.thread_states[cursor].thread_id;
+        if self.collapsed_threads.contains(&tid) {
+            self.collapsed_threads.remove(&tid);
         } else {
-            &self.parallel.thread_states
+            self.collapsed_threads.insert(tid);
+        }
+    }
+
+    pub fn keys_rebuilt(&self) -> usize {
+        // Sum keys across both sides; whichever is actively running contributes.
+        let count_side = |side: &SideSnapshot| -> usize {
+            side.thread_states
+                .iter()
+                .flat_map(|ts| ts.slots.iter())
+                .map(|slot| match slot.state {
+                    SlotState::Done { keys_found, .. } => keys_found,
+                    SlotState::Processing { keys_found, .. } => keys_found,
+                    _ => 0,
+                })
+                .sum()
         };
-        states
-            .iter()
-            .flat_map(|ts| ts.slots.iter())
-            .map(|slot| match slot.state {
-                SlotState::Done { keys_found, .. } => keys_found,
-                SlotState::Processing { keys_found, .. } => keys_found,
-                _ => 0,
-            })
-            .sum()
+        // In `both` mode the serial run is shown on left; use whichever is
+        // currently in progress, falling back to the larger count.
+        count_side(&self.serial).max(count_side(&self.parallel))
     }
 }
 
@@ -84,7 +125,7 @@ pub fn draw(frame: &mut Frame, state: &LiveState) {
         horizontal: 1,
         vertical: 1,
     });
-    let footer_height = 4u16;
+    let footer_height = 5u16; // 3 timing lines + separator + hint line
     let content_height = inner.height.saturating_sub(footer_height);
 
     let content_rect = Rect {
@@ -108,27 +149,56 @@ pub fn draw(frame: &mut Frame, state: &LiveState) {
         vec![content_rect]
     };
 
+    let serial_focused = state.columns == 1 || state.focused == FocusedColumn::Serial;
+    let parallel_focused = state.focused == FocusedColumn::Parallel;
     draw_column(
         frame,
         column_rects[0],
         &state.serial,
-        state.scroll,
-        state.columns == 1,
+        state.serial_scroll,
+        serial_focused,
+        None, // serial column has no toggle cursor
+        &HashSet::new(),
     );
     if state.columns == 2 {
-        draw_column(frame, column_rects[1], &state.parallel, state.scroll, false);
+        draw_column(
+            frame,
+            column_rects[1],
+            &state.parallel,
+            state.parallel_scroll,
+            parallel_focused,
+            Some(state.parallel_cursor),
+            &state.collapsed_threads,
+        );
     }
 
     draw_footer(frame, footer_rect, state);
 }
 
-fn draw_column(frame: &mut Frame, area: Rect, side: &SideSnapshot, scroll: u16, full_width: bool) {
+fn draw_column(
+    frame: &mut Frame,
+    area: Rect,
+    side: &SideSnapshot,
+    scroll: u16,
+    focused: bool,
+    // Some(cursor) means this column has a navigable cursor for toggling.
+    cursor: Option<usize>,
+    collapsed: &HashSet<usize>,
+) {
     let border_style = if side.done {
         Style::default().fg(Color::Green)
+    } else if focused {
+        Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let status = if side.done { "done" } else { "running..." };
+    let status = if side.done {
+        "done"
+    } else if side.started_at.is_some() {
+        "running..."
+    } else {
+        "waiting"
+    };
     let block = Block::default()
         .title(format!(" {} - {} ", side.label, status))
         .borders(Borders::ALL)
@@ -139,32 +209,65 @@ fn draw_column(frame: &mut Frame, area: Rect, side: &SideSnapshot, scroll: u16, 
     });
     frame.render_widget(block, area);
 
+    // Placeholder when no slots are assigned yet.
+    if side.thread_states.iter().all(|ts| ts.slots.is_empty()) && !side.done {
+        let msg = if side.started_at.is_none() {
+            "  (waiting for previous run to finish...)"
+        } else {
+            "  (loading file list...)"
+        };
+        frame.render_widget(
+            Paragraph::new(msg).style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+
     let mut lines: Vec<Line> = Vec::new();
 
-    for thread in &side.thread_states {
-        // Thread header.
-        lines.push(Line::from(Span::styled(
-            format!("Thread {}", thread.thread_id),
+    for (thread_idx, thread) in side.thread_states.iter().enumerate() {
+        let is_collapsed = collapsed.contains(&thread.thread_id);
+        let is_cursor = cursor.map(|c| c == thread_idx).unwrap_or(false);
+
+        // Thread header: ▶/▼ indicator + optional cursor highlight.
+        let toggle_icon = if is_collapsed { "▶" } else { "▼" };
+        let file_count = thread.slots.len();
+        let done_count = thread.slots.iter()
+            .filter(|s| matches!(s.state, SlotState::Done { .. }))
+            .count();
+        let header_text = if is_collapsed {
+            format!("{} Thread {}  ({}/{} files)", toggle_icon, thread.thread_id, done_count, file_count)
+        } else {
+            format!("{} Thread {}", toggle_icon, thread.thread_id)
+        };
+        let header_style = if is_cursor && focused {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
             Style::default()
                 .fg(COLOR_HEADER)
-                .add_modifier(Modifier::BOLD),
-        )));
+                .add_modifier(Modifier::BOLD)
+        };
+        lines.push(Line::from(Span::styled(header_text, header_style)));
 
-        // One line per file slot.
-        for slot in &thread.slots {
-            let bar = render_bar(slot.file_size_bytes, &slot.state);
-            let suffix = slot_suffix(&slot.state, full_width);
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  f:{:03} ", slot.file_id),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                bar,
-                Span::styled(suffix, Style::default().fg(Color::DarkGray)),
-            ]));
+        // File slots — skipped when collapsed.
+        if !is_collapsed {
+            for slot in &thread.slots {
+                let bar = render_bar(slot.file_size_bytes, &slot.state);
+                let suffix = slot_suffix(&slot.state);
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  f:{:03} ", slot.file_id),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    bar,
+                    Span::styled(suffix, Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+            lines.push(Line::default());
         }
-
-        lines.push(Line::default());
     }
 
     let para = Paragraph::new(lines).scroll((scroll, 0));
@@ -191,10 +294,7 @@ fn render_bar(file_size: u64, state: &SlotState) -> Span<'static> {
     Span::styled(bar, Style::default().fg(color))
 }
 
-fn slot_suffix(state: &SlotState, show_detail: bool) -> String {
-    if !show_detail {
-        return String::new();
-    }
+fn slot_suffix(state: &SlotState) -> String {
     match state {
         SlotState::Queued => "  queued".to_string(),
         SlotState::Processing { keys_found, .. } => {
@@ -221,6 +321,44 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &LiveState) {
     };
 
     let keys_rebuilt = state.keys_rebuilt();
+
+    // Hint line changes based on which column is focused and whether done.
+    let parallel_focused = state.focused == FocusedColumn::Parallel && state.columns == 2;
+    let hint_line = if state.finished && !parallel_focused {
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("Enter", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(": results    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("↑/↓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(": scroll    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("←/→", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(": switch column    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("q", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(": quit", Style::default().fg(Color::DarkGray)),
+        ])
+    } else if parallel_focused {
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("↑/↓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(": move cursor    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Enter", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(": toggle thread    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("←", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(": serial column    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("q", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(": quit", Style::default().fg(Color::DarkGray)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("↑/↓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(": scroll    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("←/→", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(": switch column    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("q", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(": quit", Style::default().fg(Color::DarkGray)),
+        ])
+    };
 
     let lines = vec![
         Line::from(vec![
@@ -277,6 +415,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &LiveState) {
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
+        hint_line,
     ];
 
     let block = Block::default()

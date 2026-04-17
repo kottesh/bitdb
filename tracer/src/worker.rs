@@ -47,6 +47,11 @@ pub struct RunResult {
     pub keys_per_sec: f64,
 }
 
+/// A handle to the live progress of an in-flight `run_scan` call.
+/// The TUI can clone the inner `Vec<ThreadState>` each frame to get a
+/// consistent snapshot without blocking the workers for long.
+pub type LiveProgress = Arc<Mutex<Vec<ThreadState>>>;
+
 /// Distribute `file_ids` across `thread_count` threads round-robin.
 ///
 /// Thread `i` receives file ids at positions `i, i+N, i+2N, ...`
@@ -79,7 +84,16 @@ pub fn assign_files(file_ids: &[u32], thread_count: usize) -> Vec<ThreadState> {
 /// Hint files are deleted before scanning so the full record-decode path
 /// is always exercised.  Returns a `RunResult` with per-thread slot states
 /// and aggregate timing.
-pub fn run_scan(data_dir: &Path, thread_count: usize) -> std::io::Result<RunResult> {
+///
+/// The caller can pass a `LiveProgress` arc that will be populated with
+/// the initial file assignment before any scanning begins, and updated
+/// in real time by the workers throughout the scan.  Pass `None` when
+/// live progress is not needed.
+pub fn run_scan(
+    data_dir: &Path,
+    thread_count: usize,
+    live: Option<&LiveProgress>,
+) -> std::io::Result<RunResult> {
     // Collect all data file ids in ascending order.
     let mut file_ids: Vec<u32> = std::fs::read_dir(data_dir)?
         .filter_map(|e| e.ok())
@@ -118,7 +132,14 @@ pub fn run_scan(data_dir: &Path, thread_count: usize) -> std::io::Result<RunResu
     }
 
     // Shared state written by workers, read by the TUI render loop.
-    let shared: Arc<Mutex<Vec<ThreadState>>> = Arc::new(Mutex::new(assignment));
+    // If the caller supplied a LiveProgress arc, reuse it so the TUI can
+    // poll it without any extra channel; otherwise create a local one.
+    let shared: Arc<Mutex<Vec<ThreadState>>> = if let Some(lp) = live {
+        *lp.lock().unwrap() = assignment;
+        lp.clone()
+    } else {
+        Arc::new(Mutex::new(assignment))
+    };
 
     let wall_start = Instant::now();
 
@@ -173,7 +194,8 @@ pub fn run_scan(data_dir: &Path, thread_count: usize) -> std::io::Result<RunResu
                 let total_bytes = bytes.len() as u64;
                 let mut offset = 0usize;
                 let mut keys_found = 0usize;
-                // Report progress every 5000 records.
+                // Report progress every 500 records so the TUI sees
+                // movement even on small / fast files.
                 let mut since_last_report = 0usize;
 
                 while offset < bytes.len() {
@@ -183,7 +205,7 @@ pub fn run_scan(data_dir: &Path, thread_count: usize) -> std::io::Result<RunResu
                             keys_found += 1;
                             since_last_report += 1;
 
-                            if since_last_report >= 5000 {
+                            if since_last_report >= 500 {
                                 since_last_report = 0;
                                 let mut states = shared.lock().unwrap();
                                 states[thread_idx].slots[slot_idx].state = SlotState::Processing {

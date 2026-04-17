@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -19,11 +19,14 @@ use ratatui::backend::CrosstermBackend;
 use crate::dataset::{GenerateProgress, generate};
 use crate::worker::{RunResult, run_scan};
 
-use self::live::{LiveState, SideSnapshot};
+use std::collections::HashSet;
+use self::live::{FocusedColumn, LiveState, SideSnapshot};
+use crate::worker::LiveProgress;
 use self::result::ResultState;
-use self::setup::SetupState;
+use self::setup::{RunMode, SetupState};
 
 /// Top-level screen discriminant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Screen {
     Setup,
     Generating,
@@ -31,19 +34,19 @@ enum Screen {
     Result,
 }
 
-/// Run the tracer TUI.  Sets up the terminal, runs the event loop, and always
-/// restores the terminal before returning.
+/// Run the tracer TUI.  Sets up the terminal, runs the event loop, and
+/// unconditionally restores the terminal before returning.
 pub fn run(data_dir: PathBuf) -> io::Result<()> {
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    stdout.execute(EnterAlternateScreen)?;
+    io::stdout().execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
     let result = event_loop(&mut terminal, data_dir);
 
+    // Always restore terminal, even on error.
     let _ = disable_raw_mode();
-    let _ = stdout.execute(LeaveAlternateScreen);
+    let _ = io::stdout().execute(LeaveAlternateScreen);
     result
 }
 
@@ -57,39 +60,33 @@ fn event_loop(
         Arc::new(Mutex::new(GenerateProgress::default()));
     let mut live_state: Option<LiveState> = None;
     let mut result_state: Option<ResultState> = None;
-
-    // Background threads post results here when done.
-    let pending_serial: Arc<Mutex<Option<RunResult>>> = Arc::new(Mutex::new(None));
-    let pending_parallel: Arc<Mutex<Option<RunResult>>> = Arc::new(Mutex::new(None));
+    let mut pending_serial: Arc<Mutex<Option<RunResult>>> = Arc::new(Mutex::new(None));
+    let mut pending_parallel: Arc<Mutex<Option<RunResult>>> = Arc::new(Mutex::new(None));
 
     loop {
-        // Render current screen.
-        match &screen {
+        // ---- render --------------------------------------------------------
+        match screen {
             Screen::Setup => {
                 terminal.draw(|f| setup::draw(f, &setup))?;
             }
             Screen::Generating => {
                 terminal.draw(|f| generate::draw(f, &generate_progress))?;
 
-                // Check if generation finished.
                 let done = {
                     let p = generate_progress.lock().unwrap();
                     p.total_keys > 0 && p.keys_written >= p.total_keys
                 };
                 if done {
-                    screen = Screen::Live;
-                    live_state = Some(build_live_state(&setup));
-                    // Kick off serial run in background.
-                    start_serial_run(
-                        data_dir.clone(),
-                        1,
-                        pending_serial.clone(),
-                        live_state.as_mut().unwrap(),
+                    screen = transition_to_live(
+                        &setup,
+                        &data_dir,
+                        &mut live_state,
+                        &pending_serial,
+                        &pending_parallel,
                     );
                 }
             }
             Screen::Live => {
-                // Poll background run results.
                 tick_live(
                     live_state.as_mut().unwrap(),
                     &pending_serial,
@@ -100,10 +97,8 @@ fn event_loop(
 
                 terminal.draw(|f| live::draw(f, live_state.as_ref().unwrap()))?;
 
-                // Both sides done -> transition to result.
                 if both_done(live_state.as_ref().unwrap(), &setup) {
-                    result_state = Some(build_result(&setup, live_state.as_ref().unwrap()));
-                    screen = Screen::Result;
+                    live_state.as_mut().unwrap().finished = true;
                 }
             }
             Screen::Result => {
@@ -111,176 +106,222 @@ fn event_loop(
             }
         }
 
-        // Handle key events (non-blocking 16ms poll).
+        // ---- events (16ms non-blocking poll = ~60fps) ----------------------
         if !event::poll(std::time::Duration::from_millis(16))? {
             continue;
         }
-        if let Event::Key(key) = event::read()? {
-            match screen {
-                Screen::Setup => {
-                    if handle_setup_key(&mut setup, key) == SetupAction::Quit {
-                        return Ok(());
-                    } else if handle_setup_key(&mut setup, key) == SetupAction::Run {
-                        // Handled below - re-evaluate after match.
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+
+        // Ctrl-C quits from any screen.
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Ok(());
+        }
+
+        match screen {
+            Screen::Setup => match key.code {
+                KeyCode::Char('q') => return Ok(()),
+                KeyCode::Char('g') | KeyCode::Char('G') => {
+                    spawn_generate(&data_dir, &setup, &generate_progress);
+                    screen = Screen::Generating;
+                }
+                KeyCode::Enter => {
+                    if setup.needs_generation() {
+                        spawn_generate(&data_dir, &setup, &generate_progress);
+                        screen = Screen::Generating;
+                    } else {
+                        screen = transition_to_live(
+                            &setup,
+                            &data_dir,
+                            &mut live_state,
+                            &pending_serial,
+                            &pending_parallel,
+                        );
                     }
-                    match handle_setup_key(&mut setup, key) {
-                        SetupAction::Quit => return Ok(()),
-                        SetupAction::Run => {
-                            if setup.needs_generation() {
-                                // Reset progress and launch generation thread.
-                                *generate_progress.lock().unwrap() = GenerateProgress::default();
-                                let prog = generate_progress.clone();
-                                let params = setup.params();
-                                let dir = data_dir.clone();
-                                std::thread::spawn(move || {
-                                    let _ = generate(&dir, &params, prog);
-                                });
-                                screen = Screen::Generating;
-                            } else {
-                                screen = Screen::Live;
-                                live_state = Some(build_live_state(&setup));
-                                start_serial_run(
-                                    data_dir.clone(),
-                                    1,
-                                    pending_serial.clone(),
-                                    live_state.as_mut().unwrap(),
-                                );
+                }
+                KeyCode::Up => setup.focus_prev(),
+                KeyCode::Down => setup.focus_next(),
+                KeyCode::Left | KeyCode::Char('-') => setup.decrement(),
+                KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => setup.increment(),
+                _ => {}
+            },
+
+            Screen::Generating => {
+                if key.code == KeyCode::Char('q') {
+                    return Ok(());
+                }
+            }
+
+            Screen::Live => {
+                if let Some(ls) = live_state.as_mut() {
+                    match key.code {
+                        KeyCode::Char('q') => return Ok(()),
+                        KeyCode::Left => {
+                            if ls.columns == 2 {
+                                ls.focused = FocusedColumn::Serial;
                             }
                         }
-                        SetupAction::Regenerate => {
-                            *generate_progress.lock().unwrap() = GenerateProgress::default();
-                            let prog = generate_progress.clone();
-                            let params = setup.params();
-                            let dir = data_dir.clone();
-                            std::thread::spawn(move || {
-                                let _ = generate(&dir, &params, prog);
-                            });
-                            screen = Screen::Generating;
+                        KeyCode::Right => {
+                            if ls.columns == 2 {
+                                ls.focused = FocusedColumn::Parallel;
+                            }
                         }
-                        SetupAction::None => {}
-                    }
-                }
-                Screen::Generating => {
-                    if is_quit(key) {
-                        return Ok(());
-                    }
-                }
-                Screen::Live => {
-                    if is_quit(key) {
-                        return Ok(());
-                    }
-                    if let Some(ls) = live_state.as_mut() {
-                        match key.code {
-                            KeyCode::Up => ls.scroll = ls.scroll.saturating_sub(1),
-                            KeyCode::Down => ls.scroll += 1,
-                            _ => {}
+                        KeyCode::Up => match ls.focused {
+                            FocusedColumn::Serial => {
+                                ls.serial_scroll = ls.serial_scroll.saturating_sub(1);
+                            }
+                            FocusedColumn::Parallel => {
+                                ls.parallel_cursor = ls.parallel_cursor.saturating_sub(1);
+                                // Keep scroll in sync so cursor stays visible.
+                                ls.parallel_scroll = ls.parallel_scroll
+                                    .min(ls.parallel_cursor as u16);
+                            }
+                        },
+                        KeyCode::Down => match ls.focused {
+                            FocusedColumn::Serial => {
+                                ls.serial_scroll = ls.serial_scroll.saturating_add(1);
+                            }
+                            FocusedColumn::Parallel => {
+                                let max = ls.parallel_thread_count().saturating_sub(1);
+                                ls.parallel_cursor = (ls.parallel_cursor + 1).min(max);
+                            }
+                        },
+                        KeyCode::Enter => {
+                            if ls.focused == FocusedColumn::Parallel && ls.columns == 2 {
+                                // Toggle the thread under the cursor.
+                                ls.toggle_parallel_cursor();
+                            } else if ls.finished {
+                                result_state = Some(build_result(&setup, ls));
+                                screen = Screen::Result;
+                            }
                         }
+                        KeyCode::Char(' ') if ls.finished => {
+                            result_state = Some(build_result(&setup, ls));
+                            screen = Screen::Result;
+                        }
+                        _ => {}
                     }
                 }
-                Screen::Result => match key.code {
-                    KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Char('r') => {
-                        // Reset everything and go back to setup.
-                        *pending_serial.lock().unwrap() = None;
-                        *pending_parallel.lock().unwrap() = None;
-                        live_state = None;
-                        result_state = None;
-                        screen = Screen::Setup;
-                    }
-                    _ => {}
-                },
             }
+
+            Screen::Result => match key.code {
+                KeyCode::Char('q') => return Ok(()),
+                KeyCode::Char('r') | KeyCode::Char('R') => {
+                    // Reset run state; keep setup params and existing dataset.
+                    pending_serial = Arc::new(Mutex::new(None));
+                    pending_parallel = Arc::new(Mutex::new(None));
+                    live_state = None;
+                    result_state = None;
+                    screen = Screen::Setup;
+                }
+                _ => {}
+            },
         }
     }
 }
 
 // ---- helpers ----------------------------------------------------------------
 
-#[derive(Eq, PartialEq)]
-enum SetupAction {
-    None,
-    Quit,
-    Run,
-    Regenerate,
-}
+/// Reset pending slots and transition to the Live screen, kicking off the
+/// first run (serial in `Both`/`Serial` mode; parallel in `Parallel` mode).
+fn transition_to_live(
+    setup: &SetupState,
+    data_dir: &Path,
+    live_state: &mut Option<LiveState>,
+    pending_serial: &Arc<Mutex<Option<RunResult>>>,
+    pending_parallel: &Arc<Mutex<Option<RunResult>>>,
+) -> Screen {
+    // Clear any stale results from a previous run.
+    *pending_serial.lock().unwrap() = None;
+    *pending_parallel.lock().unwrap() = None;
 
-fn handle_setup_key(state: &mut SetupState, key: KeyEvent) -> SetupAction {
-    match key.code {
-        KeyCode::Char('q') => SetupAction::Quit,
-        KeyCode::Char('g') => SetupAction::Regenerate,
-        KeyCode::Enter => SetupAction::Run,
-        KeyCode::Up => {
-            state.focus_prev();
-            SetupAction::None
+    *live_state = Some(build_live_state(setup));
+
+    let ls = live_state.as_mut().unwrap();
+
+    match setup.mode {
+        RunMode::Parallel => {
+            // Skip serial; go straight to parallel.
+            ls.parallel.started_at = Some(Instant::now());
+            let lp: LiveProgress = Arc::new(Mutex::new(Vec::new()));
+            ls.parallel.live_progress = Some(lp.clone());
+            let dir = data_dir.to_path_buf();
+            let threads = setup.threads;
+            let pp = pending_parallel.clone();
+            std::thread::spawn(move || {
+                if let Ok(r) = run_scan(&dir, threads, Some(&lp)) {
+                    *pp.lock().unwrap() = Some(r);
+                }
+            });
         }
-        KeyCode::Down => {
-            state.focus_next();
-            SetupAction::None
+        RunMode::Serial | RunMode::Both => {
+            // Serial runs first; parallel will be launched by tick_live when
+            // serial completes (in Both mode only).
+            ls.serial.started_at = Some(Instant::now());
+            let lp: LiveProgress = Arc::new(Mutex::new(Vec::new()));
+            ls.serial.live_progress = Some(lp.clone());
+            let dir = data_dir.to_path_buf();
+            let ps = pending_serial.clone();
+            std::thread::spawn(move || {
+                if let Ok(r) = run_scan(&dir, 1, Some(&lp)) {
+                    *ps.lock().unwrap() = Some(r);
+                }
+            });
         }
-        KeyCode::Left | KeyCode::Char('-') => {
-            state.decrement();
-            SetupAction::None
-        }
-        KeyCode::Right | KeyCode::Char('+') => {
-            state.increment();
-            SetupAction::None
-        }
-        _ => SetupAction::None,
     }
+
+    Screen::Live
 }
 
-fn is_quit(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('q'))
-        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+/// Spawn a dataset generation thread and reset progress.
+fn spawn_generate(data_dir: &Path, setup: &SetupState, progress: &Arc<Mutex<GenerateProgress>>) {
+    *progress.lock().unwrap() = GenerateProgress::default();
+    let dir = data_dir.to_path_buf();
+    let params = setup.params();
+    let prog = progress.clone();
+    std::thread::spawn(move || {
+        let _ = generate(&dir, &params, prog);
+    });
 }
 
 /// Build a fresh `LiveState` from the current setup.
 fn build_live_state(setup: &SetupState) -> LiveState {
     use crate::worker::assign_files;
-    // Empty assignments; will be filled by run_scan results.
-    let empty_serial = SideSnapshot {
-        label: "SERIAL".to_string(),
+    let serial_side = SideSnapshot {
+        label: "SERIAL (1 thread)".to_string(),
         thread_states: assign_files(&[], 1),
         elapsed_us: 0,
-        done: false,
+        done: setup.mode == RunMode::Parallel, // mark done so it's grayed out
         result: None,
+        started_at: None,
+        live_progress: None,
     };
-    let empty_parallel = SideSnapshot {
+    let parallel_side = SideSnapshot {
         label: format!("PARALLEL ({} threads)", setup.threads),
         thread_states: assign_files(&[], setup.threads),
         elapsed_us: 0,
-        done: false,
+        done: setup.mode == RunMode::Serial, // mark done so it's grayed out
         result: None,
+        started_at: None,
+        live_progress: None,
     };
-    let columns = match setup.mode {
-        setup::RunMode::Both => 2,
-        _ => 1,
-    };
+    let columns = if setup.mode == RunMode::Both { 2 } else { 1 };
     LiveState {
-        serial: empty_serial,
-        parallel: empty_parallel,
+        serial: serial_side,
+        parallel: parallel_side,
         total_keys: setup.keys,
-        started_at: Instant::now(),
         columns,
-        scroll: 0,
+        serial_scroll: 0,
+        parallel_scroll: 0,
+        focused: FocusedColumn::Serial,
+        parallel_cursor: 0,
+        collapsed_threads: HashSet::new(),
+        finished: false,
     }
 }
 
-/// Launch serial run in a background thread, posting result to `pending`.
-fn start_serial_run(
-    data_dir: PathBuf,
-    threads: usize,
-    pending: Arc<Mutex<Option<RunResult>>>,
-    _live: &mut LiveState,
-) {
-    std::thread::spawn(move || {
-        if let Ok(result) = run_scan(&data_dir, threads) {
-            *pending.lock().unwrap() = Some(result);
-        }
-    });
-}
-
-/// Poll pending results and update live state accordingly.
+/// Poll pending results and update the live state each tick.
 fn tick_live(
     live: &mut LiveState,
     pending_serial: &Arc<Mutex<Option<RunResult>>>,
@@ -288,43 +329,63 @@ fn tick_live(
     setup: &SetupState,
     data_dir: &Path,
 ) {
-    // Absorb completed serial result.
+    // --- serial side --------------------------------------------------------
     if !live.serial.done {
         if let Some(r) = pending_serial.lock().unwrap().take() {
-            live.serial.thread_states = r.thread_states.clone();
+            // Use the measured wall time from run_scan for the final value.
             live.serial.elapsed_us = r.wall_time_us;
+            live.serial.thread_states = r.thread_states.clone();
             live.serial.done = true;
+            live.serial.live_progress = None; // scan complete, drop the arc
             live.serial.result = Some(r);
 
-            // Now kick off parallel run if mode requires it.
-            if setup.mode != setup::RunMode::Serial {
+            // In Both mode, kick off the parallel run immediately after serial.
+            if setup.mode == RunMode::Both {
                 let dir = data_dir.to_path_buf();
                 let threads = setup.threads;
                 let pp = pending_parallel.clone();
+                live.parallel.started_at = Some(Instant::now());
+                let lp: LiveProgress = Arc::new(Mutex::new(Vec::new()));
+                live.parallel.live_progress = Some(lp.clone());
                 std::thread::spawn(move || {
-                    if let Ok(result) = run_scan(&dir, threads) {
-                        *pp.lock().unwrap() = Some(result);
+                    if let Ok(r) = run_scan(&dir, threads, Some(&lp)) {
+                        *pp.lock().unwrap() = Some(r);
                     }
                 });
             }
         } else {
-            // Serial still running - update elapsed.
-            live.serial.elapsed_us = live.started_at.elapsed().as_micros() as u64;
+            // Still running — pull the latest thread states from the shared arc.
+            if let Some(lp) = &live.serial.live_progress {
+                let snapshot = lp.lock().unwrap().clone();
+                if !snapshot.is_empty() {
+                    live.serial.thread_states = snapshot;
+                }
+            }
+            if let Some(t0) = live.serial.started_at {
+                live.serial.elapsed_us = t0.elapsed().as_micros() as u64;
+            }
         }
     }
 
-    // Absorb completed parallel result.
+    // --- parallel side ------------------------------------------------------
     if !live.parallel.done {
         if let Some(r) = pending_parallel.lock().unwrap().take() {
-            live.parallel.thread_states = r.thread_states.clone();
+            // Use the measured wall time from run_scan for the final value.
             live.parallel.elapsed_us = r.wall_time_us;
+            live.parallel.thread_states = r.thread_states.clone();
             live.parallel.done = true;
+            live.parallel.live_progress = None; // scan complete, drop the arc
             live.parallel.result = Some(r);
-        } else if live.serial.done {
-            // Parallel is running - update elapsed from wall clock minus serial time.
-            let since_serial_done = live.started_at.elapsed().as_micros() as u64;
-            if since_serial_done > live.serial.elapsed_us {
-                live.parallel.elapsed_us = since_serial_done - live.serial.elapsed_us;
+        } else if setup.mode != RunMode::Serial {
+            // Still running — pull the latest thread states from the shared arc.
+            if let Some(lp) = &live.parallel.live_progress {
+                let snapshot = lp.lock().unwrap().clone();
+                if !snapshot.is_empty() {
+                    live.parallel.thread_states = snapshot;
+                }
+            }
+            if let Some(t0) = live.parallel.started_at {
+                live.parallel.elapsed_us = t0.elapsed().as_micros() as u64;
             }
         }
     }
@@ -332,15 +393,17 @@ fn tick_live(
 
 fn both_done(live: &LiveState, setup: &SetupState) -> bool {
     match setup.mode {
-        setup::RunMode::Serial => live.serial.done,
-        setup::RunMode::Parallel => live.parallel.done,
-        setup::RunMode::Both => live.serial.done && live.parallel.done,
+        RunMode::Serial => live.serial.done,
+        RunMode::Parallel => live.parallel.done,
+        RunMode::Both => live.serial.done && live.parallel.done,
     }
 }
 
 fn build_result(setup: &SetupState, live: &LiveState) -> ResultState {
-    let total_bytes = setup.params().keys as u64
-        * (setup.params().value_size as u64 + 26 + setup.params().keys.to_string().len() as u64);
+    // Estimate total bytes from record overhead: key(12) + value + header(~14).
+    let params = setup.params();
+    let record_overhead: u64 = 14 + 12; // header + "key:XXXXXXXX" key
+    let total_bytes = params.keys as u64 * (record_overhead + params.value_size as u64);
 
     let total_files = live
         .serial
