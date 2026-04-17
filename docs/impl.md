@@ -964,6 +964,39 @@ Full source:
 
 # Summary
 
+BitDB implements the Bitcask storage model in Rust: an append-only log
+for writes and a fully in-memory index (KeyDir) for O(1) reads. Every
+value lives at a fixed offset in a numbered data file; a get is one
+hash lookup plus one seek, with no tree traversal or B-tree page splits.
+
+The project's parallel contribution is in two places. First, startup
+rebuild: on `Engine::open`, all data files are scanned in parallel
+using Rayon's work-stealing thread pool. Each file is an independent
+unit of work, so threads never contend on the scan itself. After all
+files are scanned, the combined entry list is sorted by `(file_id,
+offset)` before insertion into the KeyDir, which restores the
+deterministic serial ordering and guarantees the last write always wins.
+On a 5 million-key, 1.3 GB dataset this delivers a **5.69× speedup**
+(5605 ms serial → 985 ms parallel on 7 threads).
+
+Second, merge compaction: the read phase that loads live values from
+disk before rewriting them is also parallelised with `par_iter`. Each
+record read is a fully independent disk seek, so the parallel speedup
+scales cleanly with I/O concurrency. The Criterion benchmark shows a
+**~2× speedup** on 500 keys with parallelism overhead included;
+real-world datasets see larger gains.
+
+Hint files act as a compact fast-path: after each merge, the engine
+writes a sidecar `.hint` file containing only KeyDir metadata (no
+value bytes). On the next startup, the parallel scan reads hint files
+instead of full data files, dramatically reducing I/O for large-value
+workloads.
+
+The tracer crate makes all of this visible. It generates a synthetic
+dataset, runs both paths with instrumented workers, and renders a
+real-time split-screen TUI showing per-thread, per-file progress bars
+and a final comparison of wall-clock time, keys/sec, and speedup.
+
 \vspace{\fill}
 
 \noindent\rule{\textwidth}{0.4pt}
