@@ -57,6 +57,39 @@ report:
 report-open: report
     xdg-open {{report_pdf}} 2>/dev/null || open {{report_pdf}}
 
+# Build the implementation document PDF
+impl:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ABS=$(pwd)/docs/attachments
+    COVER_TMP=$(mktemp /tmp/cover_XXXXXX.md)
+    TMP=$(mktemp /tmp/impl_XXXXXX.md)
+    sed "s|CIT_LOGO|$ABS/cit.png|g" docs/cover.md > "$COVER_TMP"
+    sed "s|{tracer_result.png}|{$ABS/tracer_result.png}|g; \
+         s|{merge_bench.png}|{$ABS/merge_bench.png}|g; \
+         s|{tracer_1.png}|{$ABS/tracer_1.png}|g; \
+         s|{tracer_2.png}|{$ABS/tracer_2.png}|g" \
+        docs/impl.md > "$TMP"
+    pandoc "$COVER_TMP" \
+        --pdf-engine=xelatex \
+        -V geometry:"top=1in,bottom=1in,left=1.25in,right=1.25in" \
+        -V papersize=a4 -V fontsize=12pt --standalone \
+        -o docs/impl_cover.pdf
+    pandoc "$TMP" \
+        --pdf-engine=xelatex \
+        -V papersize=a4 -V fontsize=12pt --standalone \
+        -o docs/impl_body.pdf
+    gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite \
+        -dPDFSETTINGS=/prepress \
+        -sOutputFile=docs/impl.pdf \
+        docs/impl_cover.pdf docs/impl_body.pdf
+    rm -f docs/impl_cover.pdf docs/impl_body.pdf "$TMP" "$COVER_TMP"
+    echo "Built docs/impl.pdf"
+
+# Open the impl PDF after building
+impl-open: impl
+    xdg-open docs/impl.pdf 2>/dev/null || open docs/impl.pdf
+
 # ── rust ──────────────────────────────────────────────────────────────────────
 
 build:
