@@ -37,6 +37,17 @@ header-includes:
     \fancyhead[R]{\small\textit{Parallel Computing Laboratory}}
     \fancyfoot[C]{\thepage}
     \renewcommand{\headrulewidth}{0.4pt}
+  - |
+    \AtBeginDocument{
+      \let\oldtoc\tableofcontents
+      \renewcommand{\tableofcontents}{
+        \pagestyle{empty}
+        \oldtoc
+        \cleardoublepage
+        \pagestyle{fancy}
+        \setcounter{page}{1}
+      }
+    }
 geometry: "top=1in, bottom=1in, left=1.25in, right=1.25in"
 papersize: a4
 fontsize: 12pt
@@ -192,9 +203,8 @@ depends on anything in file M.
    and returns a list of `(file_id, offset, KeyDirEntry, key)` tuples.
 5. Collect all per-file entry lists into a flat `Vec<ScanEntry>`.
 6. **Sort** the combined list by `(file_id ASC, offset ASC)`.
-7. Perform a single-pass linear insert into the KeyDir. Because the
-   entries are in the same order as the serial path, the last write for
-   any key always wins — correctness is preserved.
+7. Perform a single-pass linear insert into the KeyDir.
+   Entries are replayed in serial order — last writer always wins.
 
 The sort in step 6 is essential. Without it, a thread that finishes
 scanning a newer file first could insert a stale value that is then
@@ -540,13 +550,20 @@ The project is available at:
 
 \noindent\rule{\textwidth}{0.4pt}
 
-{\fontsize{7}{8}\selectfont
-\noindent\textbf{References}\\[1pt]
-\begin{enumerate}\setlength{\itemsep}{1pt}\setlength{\topsep}{1pt}\setlength{\parsep}{0pt}
-  \item Shawn T. Vanderhoeven, Justin Sheehy, et al.\ (2010). \textit{Bitcask: A Log-Structured Hash Table for Fast Key/Value Data}. Basho Technologies.
-  \item The Rayon Team. \textit{Rayon: A data-parallelism library for Rust}. \url{https://github.com/rayon-rs/rayon}
-  \item Bheemsen Jude Pereira et al.\ (2014). \textit{Criterion.rs: Statistics-driven micro-benchmarking in Rust}. \url{https://github.com/bheisler/criterion.rs}
-  \item The Rust Project Developers. \textit{The Rust Programming Language}. \url{https://doc.rust-lang.org/book/}
-  \item Georg Brandl et al.\ \textit{Ratatui: A Rust library for building terminal UIs}. \url{https://github.com/ratatui-org/ratatui}
-\end{enumerate}
-}
+\begingroup
+\normalsize
+\setlength{\parindent}{0pt}
+\vspace{2pt}
+\noindent\textbf{References}
+\vspace{2pt}
+
+\noindent [1] T. Sheehy and D. Smith, \textit{Bitcask: A Log-Structured Hash Table for Fast Key/Value Data}, Basho Technologies, 2010.
+
+\noindent [2] Rayon Contributors, \textit{Rayon: Data-parallelism library for Rust}, \url{https://github.com/rayon-rs/rayon}, 2015--present.
+
+\noindent [3] B. Pereira, \textit{Criterion.rs: Statistics-driven micro-benchmarking in Rust}, \url{https://github.com/bheisler/criterion.rs}, 2014--present.
+
+\noindent [4] S. Klabnik and C. Nichols, \textit{The Rust Programming Language}, No Starch Press, 2019. \url{https://doc.rust-lang.org/book/}
+
+\noindent [5] Ratatui Contributors, \textit{Ratatui: Terminal UI library for Rust}, \url{https://github.com/ratatui-org/ratatui}, 2023--present.
+\endgroup
