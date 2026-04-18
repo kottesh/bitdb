@@ -232,11 +232,16 @@ fn draw_column(
         // Thread header: ▶/▼ indicator + optional cursor highlight.
         let toggle_icon = if is_collapsed { "▶" } else { "▼" };
         let file_count = thread.slots.len();
-        let done_count = thread.slots.iter()
+        let done_count = thread
+            .slots
+            .iter()
             .filter(|s| matches!(s.state, SlotState::Done { .. }))
             .count();
         let header_text = if is_collapsed {
-            format!("{} Thread {}  ({}/{} files)", toggle_icon, thread.thread_id, done_count, file_count)
+            format!(
+                "{} Thread {}  ({}/{} files)",
+                toggle_icon, thread.thread_id, done_count, file_count
+            )
         } else {
             format!("{} Thread {}", toggle_icon, thread.thread_id)
         };
@@ -327,35 +332,90 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &LiveState) {
     let hint_line = if state.finished && !parallel_focused {
         Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled("Enter", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Enter",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": results    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("↑/↓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "↑/↓",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": scroll    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("←/→", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "←/→",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": switch column    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("q", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "q",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": quit", Style::default().fg(Color::DarkGray)),
         ])
     } else if parallel_focused {
         Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled("↑/↓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "↑/↓",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": move cursor    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Enter", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Enter",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": toggle thread    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("←", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "←",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": serial column    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("q", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "q",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": quit", Style::default().fg(Color::DarkGray)),
         ])
     } else {
         Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled("↑/↓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "↑/↓",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": scroll    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("←/→", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "←/→",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": switch column    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("q", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "q",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": quit", Style::default().fg(Color::DarkGray)),
         ])
     };

@@ -19,11 +19,11 @@ use ratatui::backend::CrosstermBackend;
 use crate::dataset::{GenerateProgress, generate};
 use crate::worker::{RunResult, run_scan};
 
-use std::collections::HashSet;
 use self::live::{FocusedColumn, LiveState, SideSnapshot};
-use crate::worker::LiveProgress;
 use self::result::ResultState;
 use self::setup::{RunMode, SetupState};
+use crate::worker::LiveProgress;
+use std::collections::HashSet;
 
 /// Top-level screen discriminant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,8 +174,8 @@ fn event_loop(
                             FocusedColumn::Parallel => {
                                 ls.parallel_cursor = ls.parallel_cursor.saturating_sub(1);
                                 // Keep scroll in sync so cursor stays visible.
-                                ls.parallel_scroll = ls.parallel_scroll
-                                    .min(ls.parallel_cursor as u16);
+                                ls.parallel_scroll =
+                                    ls.parallel_scroll.min(ls.parallel_cursor as u16);
                             }
                         },
                         KeyCode::Down => match ls.focused {
